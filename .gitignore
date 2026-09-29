@@ -1,0 +1,12 @@
+﻿build/
+build-cov/
+*.o
+*.obj
+*.exe
+*.elf
+*.gcda
+*.gcno
+coverage*.html
+coverage*.css
+.vscode/
+.idea/

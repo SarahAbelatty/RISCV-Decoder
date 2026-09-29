@@ -1,0 +1,247 @@
+--- a/riscv_disasm.hpp	2026-09-28 09:24:44.464803551 +0000
++++ b/riscv_disasm.hpp	2026-09-28 09:41:03.669798914 +0000
+@@ -46,6 +46,13 @@
+     return os.str();
+ }
+ 
++// Absolute target of a pc-relative branch/jump. RV32 addresses are 32 bits wide,
++// so a backward jump near address 0 wraps to 0xfffffffc, not 0xfffffffffffffffc.
++inline uint64_t branch_target(uint64_t addr, int32_t off, bool rv64) {
++    uint64_t t = addr + (uint64_t)(int64_t)off;
++    return rv64 ? t : (t & 0xffffffffull);
++}
++
+ inline std::string csr_name(uint32_t csr) {
+     switch (csr) {
+         case 0x001: return "fflags";
+@@ -102,7 +109,6 @@
+     int32_t imm_s = sext(((insn >> 25) << 5) | ((insn >> 7) & 0x1f), 12);
+     int32_t imm_b = sext((((insn >> 31) & 1) << 12) | (((insn >> 7) & 1) << 11) |
+                           (((insn >> 25) & 0x3f) << 5) | (((insn >> 8) & 0xf) << 1), 13);
+-    int32_t imm_u = (int32_t)(insn & 0xfffff000);
+     int32_t imm_j = sext((((insn >> 31) & 1) << 20) | (((insn >> 12) & 0xff) << 12) |
+                          (((insn >> 20) & 1) << 11) | (((insn >> 21) & 0x3ff) << 1), 21);
+ 
+@@ -112,13 +118,13 @@
+ 
+     switch (opcode) {
+     case 0b0110111: // LUI
+-        os << "lui " << R(rd) << "," << hexi(imm_u >> 12);
++        os << "lui " << R(rd) << "," << hexi(insn >> 12);   // unsigned 20-bit field, like objdump
+         return os.str();
+     case 0b0010111: // AUIPC
+-        os << "auipc " << R(rd) << "," << hexi(imm_u >> 12);
++        os << "auipc " << R(rd) << "," << hexi(insn >> 12);
+         return os.str();
+     case 0b1101111: { // JAL
+-        uint64_t target = addr + imm_j;
++        uint64_t target = branch_target(addr, imm_j, rv64);
+         if (rd == 0) os << "j ";
+         else if (rd == 1) os << "jal ";
+         else os << "jal " << R(rd) << ",";
+@@ -137,7 +143,7 @@
+         static const char *names[8] = {"beq","bne",nullptr,nullptr,"blt","bge","bltu","bgeu"};
+         const char *nm = names[funct3];
+         if (!nm) { os << "unknown(branch)"; return os.str(); }
+-        uint64_t target = addr + imm_b;
++        uint64_t target = branch_target(addr, imm_b, rv64);
+         os << nm << " " << R(rs1) << "," << R(rs2) << ",0x" << std::hex << target;
+         return os.str();
+     }
+@@ -454,7 +460,7 @@
+                              ((insn>>6&1)<<7)|((insn>>7&1)<<6)|((insn>>2&1)<<5)|
+                              ((insn>>11&1)<<4)|((insn>>3&7)<<1);
+                 int32_t off = sext(b, 12);
+-                os << "jal ra,0x" << std::hex << (addr + off); return os.str();
++                os << "jal ra,0x" << std::hex << branch_target(addr, off, rv64); return os.str();
+             }
+         case 0b010: // C.LI
+             os << "li " << R(rd) << "," << imm6; return os.str();
+@@ -468,7 +474,7 @@
+             } else {
+                 int32_t imm = sext(((insn>>12&1)<<17)|((insn>>2&0x1f)<<12), 18);
+                 if (imm == 0) break;
+-                os << "lui " << R(rd) << "," << hexi(imm >> 12); return os.str();
++                os << "lui " << R(rd) << "," << hexi((imm >> 12) & 0xfffff); return os.str();
+             }
+         }
+         case 0b100: { // misc-alu
+@@ -504,14 +510,14 @@
+                          ((insn>>6&1)<<7)|((insn>>7&1)<<6)|((insn>>2&1)<<5)|
+                          ((insn>>11&1)<<4)|((insn>>3&7)<<1);
+             int32_t off = sext(b, 12);
+-            os << "j 0x" << std::hex << (addr + off); return os.str();
++            os << "j 0x" << std::hex << branch_target(addr, off, rv64); return os.str();
+         }
+         case 0b110: case 0b111: { // C.BEQZ / C.BNEZ
+             uint32_t rs1_ = creg((insn >> 7) & 0x7);
+             uint32_t b = ((insn>>12&1)<<8)|((insn>>5&3)<<6)|((insn>>2&1)<<5)|
+                          ((insn>>10&3)<<3)|((insn>>3&3)<<1);
+             int32_t off = sext(b, 9);
+-            os << (funct3 == 0b110 ? "beqz " : "bnez ") << R(rs1_) << ",0x" << std::hex << (addr + off);
++            os << (funct3 == 0b110 ? "beqz " : "bnez ") << R(rs1_) << ",0x" << std::hex << branch_target(addr, off, rv64);
+             return os.str();
+         }
+         }
+@@ -571,8 +577,15 @@
+ // Reads one instruction at `data[off]` (off < size guaranteed by caller),
+ // figures out if it's 16- or 32-bit, decodes it, returns the result.
+ inline DecodedInsn decode_one(const unsigned char *data, size_t avail, uint64_t addr, bool rv64) {
+-    uint16_t lo16 = data[0] | (avail > 1 ? (data[1] << 8) : 0);
+     DecodedInsn out;
++    if (avail < 2) {
++        // A single stray byte cannot be an instruction; never claim more than is available.
++        out.raw = data[0];
++        out.size = 1;
++        out.text = ".byte (truncated)";
++        return out;
++    }
++    uint16_t lo16 = (uint16_t)(data[0] | (data[1] << 8));
+     if ((lo16 & 0x3) != 0x3) {
+         // Compressed 16-bit instruction
+         out.raw = lo16;
+--- a/elf_reader.hpp	2026-09-28 09:24:44.636803561 +0000
++++ b/elf_reader.hpp	2026-09-28 09:41:42.003965050 +0000
+@@ -49,10 +49,16 @@
+     }
+ 
+ private:
++    // Throws unless [off, off+len) lies inside the file. Written so it cannot overflow.
++    void check_range(uint64_t off, uint64_t len, const char *what) const {
++        if (off > raw.size() || len > raw.size() - off)
++            throw std::runtime_error(std::string("truncated/corrupt ELF file (") + what +
++                                     " lies outside the file)");
++    }
++
+     template <typename T>
+     T at(uint64_t offset) const {
+-        if (offset + sizeof(T) > raw.size())
+-            throw std::runtime_error("truncated/corrupt ELF file (out-of-range read)");
++        check_range(offset, sizeof(T), "structure");
+         T v;
+         std::memcpy(&v, raw.data() + offset, sizeof(T));
+         return v; // host is little-endian in this container, matches ELFDATA2LSB
+@@ -66,19 +72,26 @@
+         return std::string(p, len);
+     }
+ 
+-    void parse64() {
+-        Elf64_Ehdr eh = at<Elf64_Ehdr>(0);
++    // One implementation for both classes: the Elf32_* and Elf64_* structs use the same field names.
++    template <typename Ehdr, typename Shdr, typename Sym>
++    void parse() {
++        Ehdr eh = at<Ehdr>(0);
+         if (eh.e_machine != EM_RISCV)
+             throw std::runtime_error("e_machine is not EM_RISCV (this file is not a RISC-V ELF)");
+         entry = eh.e_entry;
+ 
+-        std::vector<Elf64_Shdr> shdrs(eh.e_shnum);
++        if (eh.e_shentsize < sizeof(Shdr))
++            throw std::runtime_error("bad section header entry size");
++        check_range(eh.e_shoff, (uint64_t)eh.e_shnum * eh.e_shentsize, "section header table");
++
++        std::vector<Shdr> shdrs(eh.e_shnum);
+         for (int i = 0; i < eh.e_shnum; i++)
+-            shdrs[i] = at<Elf64_Shdr>(eh.e_shoff + (uint64_t)i * eh.e_shentsize);
++            shdrs[i] = at<Shdr>(eh.e_shoff + (uint64_t)i * eh.e_shentsize);
+ 
+         if (eh.e_shstrndx >= shdrs.size())
+             throw std::runtime_error("bad section-header string table index");
+-        const Elf64_Shdr &shstr = shdrs[eh.e_shstrndx];
++        const Shdr &shstr = shdrs[eh.e_shstrndx];
++        check_range(shstr.sh_offset, shstr.sh_size, "section name table");
+         const unsigned char *shstrtab = raw.data() + shstr.sh_offset;
+         uint64_t shstrtab_size = shstr.sh_size;
+ 
+@@ -91,8 +104,10 @@
+                 sv.offset = sh.sh_offset;
+                 sv.size = sh.sh_size;
+                 sv.execinstr = true;
+-                if (sh.sh_type != SHT_NOBITS) // skip .bss-like exec sections (rare)
++                if (sh.sh_type != SHT_NOBITS) { // skip .bss-like exec sections (rare)
++                    check_range(sv.offset, sv.size, "executable section");
+                     exec_sections.push_back(sv);
++                }
+             }
+         }
+ 
+@@ -104,13 +119,17 @@
+             if (nm == ".dynsym" && symtab_idx < 0) symtab_idx = (int)i;
+         }
+         if (symtab_idx >= 0) {
+-            const Elf64_Shdr &symsh = shdrs[symtab_idx];
+-            const Elf64_Shdr &strsh = shdrs[symsh.sh_link];
++            const Shdr &symsh = shdrs[symtab_idx];
++            if (symsh.sh_link >= shdrs.size())
++                throw std::runtime_error("symbol table points to a missing string table");
++            const Shdr &strsh = shdrs[symsh.sh_link];
++            check_range(strsh.sh_offset, strsh.sh_size, "string table");
++            check_range(symsh.sh_offset, symsh.sh_size, "symbol table");
+             const unsigned char *strtab = raw.data() + strsh.sh_offset;
+             uint64_t strtab_size = strsh.sh_size;
+-            uint64_t count = symsh.sh_size / sizeof(Elf64_Sym);
++            uint64_t count = symsh.sh_size / sizeof(Sym);
+             for (uint64_t i = 0; i < count; i++) {
+-                Elf64_Sym sym = at<Elf64_Sym>(symsh.sh_offset + i * sizeof(Elf64_Sym));
++                Sym sym = at<Sym>(symsh.sh_offset + i * sizeof(Sym));
+                 std::string nm = cstr(strtab, strtab_size, sym.st_name);
+                 if (nm.empty()) continue;
+                 SymbolView s{nm, sym.st_value, sym.st_shndx};
+@@ -119,55 +138,6 @@
+         }
+     }
+ 
+-    void parse32() {
+-        Elf32_Ehdr eh = at<Elf32_Ehdr>(0);
+-        if (eh.e_machine != EM_RISCV)
+-            throw std::runtime_error("e_machine is not EM_RISCV (this file is not a RISC-V ELF)");
+-        entry = eh.e_entry;
+-
+-        std::vector<Elf32_Shdr> shdrs(eh.e_shnum);
+-        for (int i = 0; i < eh.e_shnum; i++)
+-            shdrs[i] = at<Elf32_Shdr>(eh.e_shoff + (uint64_t)i * eh.e_shentsize);
+-
+-        if (eh.e_shstrndx >= shdrs.size())
+-            throw std::runtime_error("bad section-header string table index");
+-        const Elf32_Shdr &shstr = shdrs[eh.e_shstrndx];
+-        const unsigned char *shstrtab = raw.data() + shstr.sh_offset;
+-        uint64_t shstrtab_size = shstr.sh_size;
+-
+-        for (auto &sh : shdrs) {
+-            if (sh.sh_type == SHT_NULL) continue;
+-            if (sh.sh_flags & SHF_EXECINSTR) {
+-                SectionView sv;
+-                sv.name = cstr(shstrtab, shstrtab_size, sh.sh_name);
+-                sv.addr = sh.sh_addr;
+-                sv.offset = sh.sh_offset;
+-                sv.size = sh.sh_size;
+-                sv.execinstr = true;
+-                if (sh.sh_type != SHT_NOBITS)
+-                    exec_sections.push_back(sv);
+-            }
+-        }
+-
+-        int symtab_idx = -1;
+-        for (size_t i = 0; i < shdrs.size(); i++) {
+-            std::string nm = cstr(shstrtab, shstrtab_size, shdrs[i].sh_name);
+-            if (nm == ".symtab") { symtab_idx = (int)i; break; }
+-            if (nm == ".dynsym" && symtab_idx < 0) symtab_idx = (int)i;
+-        }
+-        if (symtab_idx >= 0) {
+-            const Elf32_Shdr &symsh = shdrs[symtab_idx];
+-            const Elf32_Shdr &strsh = shdrs[symsh.sh_link];
+-            const unsigned char *strtab = raw.data() + strsh.sh_offset;
+-            uint64_t strtab_size = strsh.sh_size;
+-            uint64_t count = symsh.sh_size / sizeof(Elf32_Sym);
+-            for (uint64_t i = 0; i < count; i++) {
+-                Elf32_Sym sym = at<Elf32_Sym>(symsh.sh_offset + i * sizeof(Elf32_Sym));
+-                std::string nm = cstr(strtab, strtab_size, sym.st_name);
+-                if (nm.empty()) continue;
+-                SymbolView s{nm, sym.st_value, sym.st_shndx};
+-                symbols.push_back(s);
+-            }
+-        }
+-    }
++    void parse64() { parse<Elf64_Ehdr, Elf64_Shdr, Elf64_Sym>(); }
++    void parse32() { parse<Elf32_Ehdr, Elf32_Shdr, Elf32_Sym>(); }
+ };
