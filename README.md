@@ -1,113 +1,164 @@
-# riscv_decoder
+# RISC-V ELF Decoder
 
-A small, self-contained C++17 ELF/RISC-V decoder: it reads a real ELF
-file, finds every executable section, and disassembles the machine
-code into RISC-V assembly text.
+A small, dependency-free **C++17 disassembler** for RISC-V. Point it at a RISC-V ELF binary and it prints an `objdump -d`-style listing: addresses, raw instruction bits and decoded assembly, with symbol labels.
 
-## What it supports
-
-- **ELF**: both ELF32 and ELF64, little-endian only (RISC-V is
-  virtually always LE). Reads section headers, finds any section with
-  `SHF_EXECINSTR` set (`.text`, `.init`, `.fini`, `.plt`, ...), and
-  reads the symbol table (`.symtab` or `.dynsym`) to print `<label>:`
-  markers like objdump does.
-- **RISC-V instructions**:
-  - RV32I / RV64I base integer ISA (all of it: arithmetic, loads,
-    stores, branches, jumps, LUI/AUIPC, FENCE, ECALL/EBREAK, CSR ops)
-  - **M** extension (MUL/DIV/REM and the W-suffixed 64-bit variants)
-  - **C** extension (the 16-bit compressed instructions — this is
-    what makes it decode *real* compiler output, since GCC/Clang emit
-    compressed instructions by default whenever `-march` includes `C`)
-  - Common pseudo-instructions are recognized and printed the way
-    objdump prints them: `ret`, `nop`, `mv`, `li`, `j`, `jr`.
-- **Not implemented**: F/D (floating point) and A (atomics) extension
-  instructions are *recognized structurally* (opcode is matched) but
-  printed as a `.word 0x... # unsupported` placeholder rather than
-  guessed at. This is a deliberate scope decision, not an oversight —
-  see "Extending it" below for exactly where to add them.
-
-## Files
+The ELF parser is written from scratch (no libelf, no binutils), and the whole decoder lives in header files, so it is easy to read, test and reuse.
 
 ```
-elf_types.hpp     ELF32/ELF64 struct definitions (from the ELF spec)
-elf_reader.hpp    Loads a file, parses headers, extracts exec sections + symbols
-riscv_disasm.hpp  The actual instruction decoder (16-bit and 32-bit)
-main.cpp          CLI: ties it together, prints objdump-style output
-Makefile
-```
-
-## Build
-
-```bash
-make
-# or directly:
-g++ -std=c++17 -O2 -o riscv_decoder main.cpp
-```
-
-## Run
-
-```bash
-./riscv_decoder /path/to/some/riscv/binary
-```
-
-Example output:
-
-```
+$ ./riscv_decoder test.elf
 test.elf:	file format elf64-littleriscv
 entry point: 0x10000
 
 Disassembly of section .text:
 
-    000000010000:	00000513	addi a0,zero,0
-    000000010004:	00100593	addi a1,zero,1
+    000000010000:	00000513	li a0,0
+    000000010004:	00100593	li a1,1
     000000010008:	00b58633	add a2,a1,a1
     00000001000c:	4501	li a0,0
     00000001000e:	0585	addi a1,a1,1
-    ...
+    000000010018:	ff010113	addi sp,sp,-16
+    00000001001c:	00a13423	sd a0,8(sp)
+    000000010020:	8082	ret
 ```
 
-## Getting a real RISC-V ELF file to test with
+## Features
 
-This sandbox has no RISC-V cross-compiler and no network access, so
-the decoder here was validated against hand-verified machine code
-bytes instead (see `make_test_elf.py`, and the independent bit-level
-cross-check done during development). On your own machine, get a real
-binary any of these ways:
+- **RV32 and RV64**: ELF32 and ELF64 handled by one templated parser
+- **32-bit and compressed (16-bit) instructions**, mixed freely
+- **Wide ISA coverage** (see table below), including the full **RVV 1.0 vector extension**
+- **objdump-style output**: pseudo-instructions (`li`, `mv`, `ret`, `j`, `csrr`, ...), ABI register names, named CSRs
+- **Symbol labels** such as `<main>:` taken from `.symtab` (or `.dynsym`)
+- **Defensive parsing**: every read is bounds-checked, so corrupt or truncated files give a clear error instead of a crash
+- **Verified against a real `objdump`** with a differential test, and unit tests run under ASan + UBSan
 
-1. **Install a cross toolchain** (Ubuntu/Debian):
-   ```bash
-   sudo apt install gcc-riscv64-linux-gnu
-   riscv64-linux-gnu-gcc -O0 -static hello.c -o hello.elf
-   ./riscv_decoder hello.elf
-   ```
-2. **Compile bare-metal** with `riscv64-unknown-elf-gcc` (from the
-   riscv-gnu-toolchain project) if you want RV32 or no libc.
-3. **Use an existing RISC-V binary** you already have (e.g. anything
-   from a RISC-V Linux root filesystem, `/usr/bin/*` on a RISC-V
-   board, or `.ko`/`.o` files — as long as `e_machine == EM_RISCV`).
-4. Cross-check against `objdump -d` if you have RISC-V-capable
-   binutils installed (`riscv64-linux-gnu-objdump -d hello.elf`) —
-   useful while you extend the decoder further.
+## Supported instruction sets
 
-## Extending it
+| Extension | Status |
+|---|---|
+| RV32I / RV64I | Supported |
+| M (multiply/divide) | Supported |
+| A (atomics) | Supported |
+| C (compressed) | Integer forms supported; compressed FP forms print as `.half` |
+| Zcb | Partial (`c.lbu` only) |
+| Zicsr, Zifencei, Zihintpause | Supported |
+| Zba, Zbb, Zbs | Supported |
+| Zicond | Supported |
+| V (RVV 1.0) | Supported |
+| F / D (scalar floating point) | Not decoded (prints `.word`) |
+| Privileged | Partial (`mret`, `sret`, `wfi`, M/S-mode CSR names) |
 
-- **Add F/D (floating point)**: opcodes `0000111`/`0100111` (loads/
-  stores: FLW/FLD/FSW/FSD) and `1010011` (FP ALU ops, keyed off
-  `funct7`'s top 5 bits for the operation and bottom 2 for
-  single/double). Add float register names `f0`-`f31` next to `reg()`
-  in `riscv_disasm.hpp`.
-- **Add A (atomics)**: opcode `0101111`, keyed off `funct7`'s top 5
-  bits (LR/SC/AMOSWAP/AMOADD/...).
-- **Add more CSR names**: extend `csr_name()`.
-- **Symbolic relocation display**: if you want `call foo` instead of
-  a raw hex target for `.plt` entries, cross-reference `.rela.*`
-  sections — not implemented here to keep scope focused on decoding.
+Anything unrecognised is printed as `.word 0x........` / `.half 0x....` so the listing stays aligned.
 
-## How this was validated
+## Getting started
 
-Every hand-picked test instruction's decode was independently
-recomputed from the RISC-V spec's bit-field definitions in a separate
-Python script (not reusing this program's logic) and compared against
-this decoder's actual output — arithmetic, branch-target
-calculation, store addressing, and both compressed and pseudo-
-instruction printing all matched.
+### Requirements
+
+- A C++17 compiler (g++ or clang++)
+- Optional: GoogleTest, CMake, Python 3, a RISC-V `objdump` (only for tests)
+
+### Build
+
+With Make:
+
+```bash
+make
+```
+
+With CMake:
+
+```bash
+cmake -S . -B build
+cmake --build build
+```
+
+### Run
+
+```bash
+./riscv_decoder <path-to-riscv-elf>
+
+./riscv_decoder test.elf
+./riscv_decoder hello.elf | less
+```
+
+Exit code is `0` on success and `1` on a usage error or invalid/corrupt ELF file.
+
+## Testing
+
+One-time setup on Debian/Ubuntu:
+
+```bash
+sudo apt install libgtest-dev
+sudo apt install binutils-riscv64-linux-gnu   # optional, for objdump-diff
+```
+
+| Command | What it does |
+|---|---|
+| `make test` | Builds and runs all GoogleTest unit tests with AddressSanitizer + UBSan |
+| `make objdump-diff` | Compares output against a real `riscv64-*-objdump` on `test.elf` and `hello.elf` |
+| `make coverage` | Line coverage of the headers (needs `pip install gcovr`) |
+
+With CMake, run `ctest --test-dir build`. Sanitizers are on by default (`-DENABLE_SANITIZERS=OFF` to disable) and coverage is enabled with `-DENABLE_COVERAGE=ON`.
+
+## Project structure
+
+```
+.
+├── main.cpp            Driver: CLI, label map, print loop
+├── elf_types.hpp       ELF32/ELF64 structs, SectionView, SymbolView
+├── elf_reader.hpp      ElfFile: loads and validates the ELF, finds code + symbols
+├── riscv_disasm.hpp    decode_one(), decode32(), decode16(), helpers
+├── riscv_vector.hpp    RVV 1.0 decoder (namespace riscv::vec), table-driven
+├── Makefile
+├── CMakeLists.txt
+├── make_test_elf.py    Generates test.elf (hand-built RV64 ELF)
+├── hello.c             Source of hello.elf
+├── test.elf            320-byte sample input
+├── hello.elf           Statically linked RV64GC sample (~577 KB)
+└── tests/              GoogleTest suites + tools/diff_objdump.py
+```
+
+## How it works
+
+```
+ELF file → parse headers → find executable sections → decode each instruction → print
+                                   ↑                          ↑
+                              elf_reader.hpp           riscv_disasm.hpp
+```
+
+1. **`main.cpp`** validates arguments, loads the file, builds an address-to-symbol map and walks every executable section.
+2. **`elf_reader.hpp`** checks the magic, class, endianness and `e_machine == EM_RISCV`, then extracts every `SHF_EXECINSTR` section and the symbol table.
+3. **`riscv_disasm.hpp`** looks at the two lowest bits of each instruction to decide whether it is 16 or 32 bits wide, then dispatches to `decode16()` or `decode32()`.
+4. **`riscv_vector.hpp`** handles vector opcodes with lookup tables instead of large switch statements.
+
+The ELF side and the decoder side never include each other, so the decoder can be reused on any raw byte buffer:
+
+```cpp
+#include "riscv_disasm.hpp"
+
+const unsigned char bytes[] = {0x13, 0x01, 0x01, 0xff};
+riscv::DecodedInsn d = riscv::decode_one(bytes, sizeof bytes, /*addr=*/0x10000, /*rv64=*/true);
+// d.size == 4, d.raw == 0xff010113, d.text == "addi sp,sp,-16"
+```
+
+## Limitations
+
+- Only little-endian ELF files are accepted (effectively all RISC-V targets)
+- Requires section headers; files without them are not disassembled
+- Scalar F/D floating-point instructions are not decoded yet
+- Branch and jump targets are printed as absolute addresses, not `<symbol+offset>`
+
+## Roadmap
+
+- [ ] Scalar F/D (and Zfh) instructions, including compressed FP forms
+- [ ] Complete Zcb, add Zcmp/Zcmt
+- [ ] Privileged and hypervisor instructions (`sfence.vma`, ...)
+- [ ] Use program headers when section headers are missing
+- [ ] `--section` / address-range options and symbolic branch targets
+
+## Contributing
+
+Issues and pull requests are welcome. Please run `make test` and `make objdump-diff` before submitting a change, and add a unit test for any new instruction you decode.
+
+## License
+
+Add your license here (for example MIT) and include a `LICENSE` file in the repo.
