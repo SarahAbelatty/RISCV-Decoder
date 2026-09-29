@@ -87,3 +87,107 @@ TEST(DecodeOne, RandomBytesNeverCrashAndAlwaysMakeProgress) {
         }
     }
 }
+
+TEST(DecodeOne, VectorVaddVV) {
+    // vadd.vv v3,v2,v1
+    const uint32_t insn =
+        (0b000000u << 26) |  // funct6
+        (1u        << 25) |  // vm = unmasked
+        (2u        << 20) |  // vs2
+        (1u        << 15) |  // vs1
+        (0b000u     << 12) | // OPIVV
+        (3u        << 7)  |  // vd
+        0x57;                 // OP-V
+
+    const unsigned char b[] = {
+        static_cast<unsigned char>(insn & 0xff),
+        static_cast<unsigned char>((insn >> 8) & 0xff),
+        static_cast<unsigned char>((insn >> 16) & 0xff),
+        static_cast<unsigned char>((insn >> 24) & 0xff)
+    };
+
+    auto d = decode_one(b, sizeof b, 0x10000, true);
+
+    EXPECT_EQ(d.size, 4);
+    EXPECT_EQ(d.raw, insn);
+    EXPECT_EQ(d.text, "vadd.vv v3,v2,v1");
+}
+
+TEST(DecodeOne, VectorMemoryRealInstructions) {
+    const uint32_t insn1 = 0x02078087;
+    const uint32_t insn2 = 0x020700a7;
+
+    unsigned char b1[] = {
+        static_cast<unsigned char>(insn1 & 0xff),
+        static_cast<unsigned char>((insn1 >> 8) & 0xff),
+        static_cast<unsigned char>((insn1 >> 16) & 0xff),
+        static_cast<unsigned char>((insn1 >> 24) & 0xff)
+    };
+
+    unsigned char b2[] = {
+        static_cast<unsigned char>(insn2 & 0xff),
+        static_cast<unsigned char>((insn2 >> 8) & 0xff),
+        static_cast<unsigned char>((insn2 >> 16) & 0xff),
+        static_cast<unsigned char>((insn2 >> 24) & 0xff)
+    };
+
+    auto d1 = decode_one(b1, sizeof b1, 0x10000, true);
+    auto d2 = decode_one(b2, sizeof b2, 0x10004, true);
+
+    EXPECT_EQ(d1.size, 4);
+    EXPECT_EQ(d2.size, 4);
+
+    EXPECT_EQ(d1.raw, insn1);
+    EXPECT_EQ(d2.raw, insn2);
+
+    std::cout << "insn1: " << d1.text << '\n';
+    std::cout << "insn2: " << d2.text << '\n';
+}
+
+TEST(DecodeOne, VectorConfigInstructions) {
+    // vsetvli x1, x2, e8, m1, ta, ma
+    const uint32_t vsetvli =
+        (0u << 31) |
+        (0b00000000000u << 20) |
+        (2u << 15) |
+        (0b111u << 12) |
+        (1u << 7) |
+        0x57;
+
+    // vsetivli x1, 8, e8, m1, ta, ma
+    const uint32_t vsetivli =
+        (0b11u << 30) |
+        (0b0000000000u << 20) |
+        (8u << 15) |
+        (0b111u << 12) |
+        (1u << 7) |
+        0x57;
+
+    // vsetvl x1, x2, x3
+    const uint32_t vsetvl =
+        (0b10u << 30) |
+        (0b000000u << 25) |
+        (3u << 20) |
+        (2u << 15) |
+        (0b111u << 12) |
+        (1u << 7) |
+        0x57;
+
+    auto decode = [](uint32_t insn, uint64_t addr) {
+        unsigned char b[] = {
+            static_cast<unsigned char>(insn & 0xff),
+            static_cast<unsigned char>((insn >> 8) & 0xff),
+            static_cast<unsigned char>((insn >> 16) & 0xff),
+            static_cast<unsigned char>((insn >> 24) & 0xff)
+        };
+        return decode_one(b, sizeof b, addr, true);
+    };
+
+    auto d1 = decode(vsetvli, 0x10000);
+    auto d2 = decode(vsetivli, 0x10004);
+    auto d3 = decode(vsetvl, 0x10008);
+
+    std::cout << "vsetvli : " << d1.text << '\n';
+    std::cout << "vsetivli: " << d2.text << '\n';
+    std::cout << "vsetvl  : " << d3.text << '\n';
+}

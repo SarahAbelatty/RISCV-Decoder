@@ -10,3 +10,10 @@ coverage*.html
 coverage*.css
 .vscode/
 .idea/
+
+# Coverage reports
+coverage/
+
+# Build directories
+build/
+build-cov/

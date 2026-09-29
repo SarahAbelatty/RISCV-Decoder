@@ -33,7 +33,8 @@ add_executable(unit_tests
   tests/test_decode16.cpp
   tests/test_decode_one.cpp
   tests/test_elf_reader.cpp
-  tests/test_cli.cpp)
+  tests/test_cli.cpp
+  tests/test_vector.cpp)
 target_include_directories(unit_tests PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/tests)
 target_compile_definitions(unit_tests PRIVATE
   RISCV_DECODER_BIN="$<TARGET_FILE:riscv_decoder>"

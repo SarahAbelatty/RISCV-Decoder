@@ -110,9 +110,15 @@ TEST(Decode32Invalid, ReservedFunct3ValuesAreReported) {
 }
 
 TEST(Decode32Invalid, FloatAndVectorOpcodesBecomeWordPlaceholder) {
-    // fadd.d fa0,fa0,fa1 ; fld fa5,0(s3) ; fsd ; vector OP-V
-    for (uint32_t w : {0x02b57553u, 0x0009b787u, 0x09253027u, 0x0c06f7d7u}) {
+
+    // Unsupported FP encodings
+    for (uint32_t w : {
+        0x02b57553u,
+        0x0009b787u,
+        0x09253027u
+    }) {
         std::string s = t::d32(w);
+
         EXPECT_TRUE(t::starts_with(s, ".word 0x")) << s;
         EXPECT_NE(s.find("unsupported"), std::string::npos) << s;
     }

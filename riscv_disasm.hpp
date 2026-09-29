@@ -11,6 +11,7 @@
 #include <string>
 #include <sstream>
 #include <iomanip>
+#include "riscv_vector.hpp"
 
 namespace riscv {
 
@@ -160,6 +161,19 @@ inline std::string decode32(uint32_t insn, uint64_t addr, bool rv64) {
         if (!nm) { os << "unknown(store)"; return os.str(); }
         os << nm << " " << R(rs2) << "," << imm_s << "(" << R(rs1) << ")";
         return os.str();
+    }
+    case 0b0000111: { // Vector Load / FP Load
+        std::string result = vec::mem(insn, false);
+        if (!result.empty())
+            return result;
+        break;
+    }
+
+    case 0b0100111: { // Vector Store / FP Store
+        std::string result = vec::mem(insn, true);
+        if (!result.empty())
+            return result;
+        break;
     }
     case 0b0010011: { // OP-IMM
         uint32_t shamt = insn >> 20;
@@ -394,6 +408,13 @@ inline std::string decode32(uint32_t insn, uint64_t addr, bool rv64) {
             os << nm << " " << R(rd) << "," << csr << "," << R(rs1);
         return os.str();
     }
+    case 0b1010111: { // OP-V (Vector Extension)
+        std::string result = vec::op_v(insn);
+        if (!result.empty())
+            return result;
+        break;
+    }
+    
     default: break;
     }
     os << ".word 0x" << std::hex << std::setw(8) << std::setfill('0') << insn
